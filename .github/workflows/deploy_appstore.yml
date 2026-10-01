@@ -61,17 +61,14 @@ jobs:
             echo "Signing secrets not yet set. Building in unsigned/simulated mode."
           fi
 
+      - name: Precache iOS Artifacts
+        run: flutter precache --ios
+
       - name: Install Flutter Dependencies
         run: flutter pub get
 
       - name: Run Flutter Tests
         run: flutter test
-
-      - name: Pod Install
-        run: |
-          cd ios
-          pod install --repo-update
-          cd ..
 
       - name: Build iOS IPA or Unsigned App
         run: |
