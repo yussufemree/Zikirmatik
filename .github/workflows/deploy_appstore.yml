@@ -27,78 +27,87 @@ jobs:
           channel: 'stable'
           cache: true
 
+      - name: Configure Flutter & iOS Project
+        run: |
+          flutter precache --ios
+          flutter create --platforms=ios .
+          flutter pub get
+
       - name: Install Apple Certificate and Provisioning Profile
+        if: env.BUILD_CERTIFICATE_BASE64 != ''
         env:
           BUILD_CERTIFICATE_BASE64: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
           P12_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
           BUILD_PROVISION_PROFILE_BASE64: ${{ secrets.PROVISIONING_PROFILE_BASE64 }}
           KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD || 'temporal_secret_keychain' }}
         run: |
-          if [ -n "$BUILD_CERTIFICATE_BASE64" ]; then
-            CERTIFICATE_PATH=$RUNNER_TEMP/build_certificate.p12
-            PP_PATH=$RUNNER_TEMP/build_pp.mobileprovision
-            KEYCHAIN_PATH=$RUNNER_TEMP/app-signing.keychain-db
+          CERTIFICATE_PATH=$RUNNER_TEMP/build_certificate.p12
+          PP_PATH=$RUNNER_TEMP/build_pp.mobileprovision
+          KEYCHAIN_PATH=$RUNNER_TEMP/app-signing.keychain-db
 
-            # Decode certificate and provisioning profile
-            echo -n "$BUILD_CERTIFICATE_BASE64" | base64 --decode -o $CERTIFICATE_PATH
-            echo -n "$BUILD_PROVISION_PROFILE_BASE64" | base64 --decode -o $PP_PATH
+          # Decode certificate and provisioning profile
+          echo -n "$BUILD_CERTIFICATE_BASE64" | base64 --decode -o $CERTIFICATE_PATH
+          echo -n "$BUILD_PROVISION_PROFILE_BASE64" | base64 --decode -o $PP_PATH
 
-            # Create temporary keychain
-            security create-keychain -p "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
-            security set-keychain-settings -lut 21600 $KEYCHAIN_PATH
-            security unlock-keychain -p "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
+          # Create temporary keychain
+          security create-keychain -p "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
+          security set-keychain-settings -lut 21600 $KEYCHAIN_PATH
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
 
-            # Import certificate to keychain
-            security import $CERTIFICATE_PATH -P "$P12_PASSWORD" -A -t cert -f pkcs12 -k $KEYCHAIN_PATH
-            security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
-            security list-keychain -d user -s $KEYCHAIN_PATH $(security list-keychains -d user | tr -d '"')
+          # Import certificate to keychain
+          security import $CERTIFICATE_PATH -P "$P12_PASSWORD" -A -t cert -f pkcs12 -k $KEYCHAIN_PATH
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
+          security list-keychain -d user -s $KEYCHAIN_PATH $(security list-keychains -d user | tr -d '"')
 
-            # Install provisioning profile
-            mkdir -p ~/Library/MobileDevice/Provisioning\ Profiles
-            cp $PP_PATH ~/Library/MobileDevice/Provisioning\ Profiles/
-            echo "Apple signing assets installed successfully."
-          else
-            echo "Signing secrets not yet set. Building in unsigned/simulated mode."
-          fi
-
-      - name: Precache iOS Artifacts
-        run: flutter precache --ios
-
-      - name: Install Flutter Dependencies
-        run: flutter pub get
+          # Install provisioning profile
+          mkdir -p ~/Library/MobileDevice/Provisioning\ Profiles
+          cp $PP_PATH ~/Library/MobileDevice/Provisioning\ Profiles/
+          echo "Apple signing assets installed successfully."
 
       - name: Run Flutter Tests
         run: flutter test
 
       - name: Build iOS IPA or Unsigned App
+        env:
+          HAS_APPLE_CERT: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
         run: |
-          if [ -n "$BUILD_CERTIFICATE_BASE64" ]; then
+          if [ -n "$HAS_APPLE_CERT" ]; then
             echo "Building signed IPA for App Store..."
             flutter build ipa --release --export-options-plist=ios/ExportOptions.plist
           else
             echo "No Apple Certificate secret found. Building unsigned iOS release..."
             flutter build ios --release --no-codesign
             mkdir -p build/ios/ipa
-            cd build/ios/iphoneos
-            mkdir Payload
-            cp -r Runner.app Payload/
-            zip -r ../ipa/Zikirmatik-unsigned.ipa Payload
-            cd ../../..
+            if [ -d "build/ios/iphoneos/Runner.app" ]; then
+              cd build/ios/iphoneos
+              mkdir -p Payload
+              cp -r Runner.app Payload/
+              zip -r ../ipa/Zikirmatik-unsigned.ipa Payload
+              cd ../../..
+              echo "Unsigned IPA packaged successfully at build/ios/ipa/Zikirmatik-unsigned.ipa"
+            else
+              echo "Listing build output:"
+              find build -name "*.app" -o -name "Runner*"
+            fi
           fi
 
       - name: Upload IPA as Build Artifact
         uses: actions/upload-artifact@v4
+        if: always()
         with:
           name: zikirmatik-ios-ipa
-          path: build/ios/ipa/*.ipa
+          path: |
+            build/ios/ipa/*.ipa
+            build/ios/iphoneos/*.app
           retention-days: 7
 
       - name: Upload to App Store Connect / TestFlight
-        if: env.APP_STORE_CONNECT_KEY_ID != '' && env.BUILD_CERTIFICATE_BASE64 != ''
+        if: env.APP_STORE_CONNECT_KEY_ID != '' && env.HAS_APPLE_CERT != ''
         env:
           APP_STORE_CONNECT_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
           APP_STORE_CONNECT_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
           APP_STORE_CONNECT_API_KEY_BASE64: ${{ secrets.APP_STORE_CONNECT_API_KEY_BASE64 }}
+          HAS_APPLE_CERT: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
         run: |
           mkdir -p ~/.appstoreconnect/private_keys
           echo -n "$APP_STORE_CONNECT_API_KEY_BASE64" | base64 --decode > ~/.appstoreconnect/private_keys/AuthKey_${APP_STORE_CONNECT_API_KEY_ID}.p8
